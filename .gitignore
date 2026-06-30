@@ -1,0 +1,16 @@
+# 데이터 / 모델 가중치 (포트폴리오에 미포함)
+data/
+raw_data/
+adapters/
+*.safetensors
+*.pdf
+*.jsonl
+
+# 비밀
+.env
+*.token
+
+# 캐시
+__pycache__/
+*.pyc
+.DS_Store

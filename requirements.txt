@@ -1,0 +1,17 @@
+# 파인튜닝/추론 (Apple Silicon, MLX)
+mlx>=0.18.0
+mlx-lm>=0.18.0
+mlx-vlm>=0.1.0
+
+# OCR / PDF 처리
+pymupdf>=1.24.0          # import fitz
+pillow>=10.0.0           # 이미지 처리
+
+# Jira / Zephyr 연동
+requests>=2.31.0
+
+# 테스트 실행 대상 (생성 코드가 사용하는 Appium 클라이언트, selenium 포함)
+Appium-Python-Client>=3.0.0
+
+# GUI
+gradio>=4.0.0

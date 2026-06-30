@@ -1,0 +1,17 @@
+{
+  "tc_key": "QA-10042",
+  "platform": "android",
+  "tc": {
+    "id": "QA-10042",
+    "summary": "설정_알림_효과음 토글 ON/OFF",
+    "precondition": "",
+    "steps": [
+      {
+        "index": 1,
+        "step": "*[Precondition]*\n1. 설정 > 알림 화면 진입 상태",
+        "data": "*[Step]*\n1. 효과음 항목 확인\n2. 효과음 토글 선택",
+        "expected": "*[DUX / ACTION]*\n1. 효과음 항목 및 토글 노출\n2. 토글 선택 시 ON/OFF 상태 반전"
+      }
+    ]
+  }
+}

@@ -1,0 +1,373 @@
+name: Run Android Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: 'Devices to test (fold6, all, or comma-separated)'
+        required: false
+        default: 'fold6'
+        type: string
+      app_env:
+        description: 'App environment (staging or production)'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      test_filter:
+        description: 'pytest filter (e.g., test_qa_35554)'
+        required: false
+        type: string
+      cycle_id:
+        description: 'Zephyr Test Cycle ID'
+        required: true
+        type: string
+      environment:
+        description: 'Test environment name'
+        required: false
+        default: 'Android-ZFold6'
+        type: string
+
+env:
+  APPIUM_PORT: '4723'
+
+jobs:
+  android-test:
+    name: Android Device Test
+    runs-on: [self-hosted, Windows]
+    timeout-minutes: 480
+    defaults:
+      run:
+        shell: powershell -ExecutionPolicy Bypass -Command "& '{0}'"
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Set ANDROID_HOME
+        run: |
+          $androidSdkPaths = @(
+            "$env:LOCALAPPDATA\Android\Sdk",
+            "$env:USERPROFILE\AppData\Local\Android\Sdk",
+            "C:\Android\Sdk"
+          )
+
+          foreach ($path in $androidSdkPaths) {
+            if (Test-Path $path) {
+              Write-Host "Setting ANDROID_HOME to: $path"
+              echo "ANDROID_HOME=$path" >> $env:GITHUB_ENV
+              echo "ANDROID_SDK_ROOT=$path" >> $env:GITHUB_ENV
+              echo "$path\platform-tools" >> $env:GITHUB_PATH
+              break
+            }
+          }
+
+      - name: Setup Python
+        run: |
+          python -m pip install --upgrade pip --user
+          python -m pip install -r requirements.txt --user
+
+      - name: Check device connection
+        run: |
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+
+          Write-Host "Checking connected Android devices..."
+
+          $androidSdkPaths = @(
+            "$env:LOCALAPPDATA\Android\Sdk",
+            "$env:USERPROFILE\AppData\Local\Android\Sdk",
+            "C:\Android\Sdk"
+          )
+
+          foreach ($path in $androidSdkPaths) {
+            if (Test-Path $path) {
+              $env:ANDROID_HOME = $path
+              $env:ANDROID_SDK_ROOT = $path
+              break
+            }
+          }
+
+          if ($env:ANDROID_HOME -and (Test-Path "$env:ANDROID_HOME\platform-tools\adb.exe")) {
+            $adbPath = "$env:ANDROID_HOME\platform-tools\adb.exe"
+            Write-Host "Using ADB from ANDROID_HOME: $adbPath"
+
+            & $adbPath version
+
+            Write-Host "Restarting ADB server to ensure consistent version..."
+            & $adbPath kill-server
+            Start-Sleep -Seconds 2
+            & $adbPath start-server
+            Start-Sleep -Seconds 2
+
+            & $adbPath devices
+          } elseif (Get-Command adb -ErrorAction SilentlyContinue) {
+            Write-Host "WARNING: Using ADB from PATH (may cause version mismatch)"
+            adb version
+            adb devices
+          } else {
+            Write-Host "WARNING: ADB not found"
+          }
+
+      - name: Setup and Start Appium server
+        run: |
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $env:PYTHONIOENCODING = "utf-8"
+
+          Write-Host "Appium setting and server start..."
+
+          Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*appium*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Start-Sleep -Seconds 1
+
+          $androidSdkPaths = @(
+            "$env:LOCALAPPDATA\Android\Sdk",
+            "$env:USERPROFILE\AppData\Local\Android\Sdk",
+            "C:\Android\Sdk"
+          )
+
+          foreach ($path in $androidSdkPaths) {
+            if (Test-Path $path) {
+              $env:ANDROID_HOME = $path
+              $env:ANDROID_SDK_ROOT = $path
+              Write-Host "Android SDK found at: $path"
+              break
+            }
+          }
+
+          if (-not $env:ANDROID_HOME) {
+            Write-Host "ERROR: Android SDK not found"
+            exit 1
+          }
+
+          $appiumPath = "$env:APPDATA\npm\appium.cmd"
+
+          if (-not (Test-Path $appiumPath)) {
+            Write-Host "Appium CLI not found, installing..."
+            npm install -g appium
+
+            $env:Path = [System.Environment]::GetEnvironmentVariable("Path","Machine") + ";" + [System.Environment]::GetEnvironmentVariable("Path","User")
+
+            if (Test-Path $appiumPath) {
+              Write-Host "Appium installed successfully at: $appiumPath"
+
+              & $appiumPath driver install uiautomator2
+            } else {
+              Write-Host "ERROR: Appium installation failed"
+              exit 1
+            }
+          } else {
+            Write-Host "Appium found at: $appiumPath"
+
+            Write-Host "Checking installed drivers..."
+            $ErrorActionPreference = 'Continue'
+            $drivers = & $appiumPath driver list --installed 2>&1 | Out-String
+            $ErrorActionPreference = 'Stop'
+            Write-Host "Installed drivers output:"
+            Write-Host $drivers
+
+            if ($drivers -notlike "*uiautomator2*") {
+              Write-Host "Installing uiautomator2 driver..."
+              $ErrorActionPreference = 'Continue'
+              $installOutput = & $appiumPath driver install uiautomator2 2>&1 | Out-String
+              $ErrorActionPreference = 'Stop'
+              Write-Host $installOutput
+
+              $drivers = & $appiumPath driver list --installed 2>&1 | Out-String
+              if ($drivers -notlike "*uiautomator2*") {
+                Write-Host "ERROR: UiAutomator2 driver installation failed"
+                Write-Host "Driver list output: $drivers"
+                exit 1
+              } else {
+                Write-Host "UiAutomator2 driver installed successfully"
+              }
+            } else {
+              Write-Host "UiAutomator2 driver already installed"
+            }
+          }
+
+          $portInUse = Get-NetTCPConnection -LocalPort ${{ env.APPIUM_PORT }} -ErrorAction SilentlyContinue
+          if ($portInUse) {
+            Write-Host "WARNING: Port ${{ env.APPIUM_PORT }} is already in use, killing process..."
+            $portInUse | ForEach-Object {
+              Stop-Process -Id $_.OwningProcess -Force -ErrorAction SilentlyContinue
+            }
+            Start-Sleep -Seconds 2
+          }
+
+          Write-Host "Starting Appium server on port ${{ env.APPIUM_PORT }}..."
+          $logFile = "$env:TEMP\appium.log"
+
+          $appiumProcess = Start-Process -FilePath "node.exe" -ArgumentList "`"$env:APPDATA\npm\node_modules\appium\build\lib\main.js`"", "--port", "${{ env.APPIUM_PORT }}", "--address", "127.0.0.1" -PassThru -WindowStyle Hidden
+          Write-Host "Appium process started with PID: $($appiumProcess.Id)"
+
+          $maxRetries = 20
+          $ready = $false
+          for ($i = 1; $i -le $maxRetries; $i++) {
+            Start-Sleep -Seconds 3
+
+            $proc = Get-Process -Id $appiumProcess.Id -ErrorAction SilentlyContinue
+            if (-not $proc) {
+              Write-Host "WARNING: Appium process (PID: $($appiumProcess.Id)) has exited"
+              Write-Host "Exit code: $($appiumProcess.ExitCode)"
+              break
+            } else {
+              Write-Host "Appium process running (PID: $($appiumProcess.Id))"
+            }
+
+            $listening = Get-NetTCPConnection -LocalPort ${{ env.APPIUM_PORT }} -State Listen -ErrorAction SilentlyContinue
+            if ($listening) {
+              Write-Host "Port ${{ env.APPIUM_PORT }} is listening"
+            }
+
+            try {
+              $response = Invoke-WebRequest -Uri "http://127.0.0.1:${{ env.APPIUM_PORT }}/status" -UseBasicParsing -TimeoutSec 5
+              Write-Host "SUCCESS: Appium server is ready"
+              $ready = $true
+              break
+            } catch {
+              Write-Host "Waiting for Appium... ($i/$maxRetries)"
+            }
+          }
+
+          if (-not $ready) {
+            Write-Host "ERROR: Appium failed to start"
+            Write-Host "=== Port Status ==="
+            Get-NetTCPConnection -LocalPort ${{ env.APPIUM_PORT }} -ErrorAction SilentlyContinue | Format-Table
+            Write-Host "=== All node processes ==="
+            Get-Process -Name "node" -ErrorAction SilentlyContinue | Format-Table Id, ProcessName, StartTime
+            exit 1
+          }
+
+      - name: Check Appium logs
+        run: |
+          Write-Host "=== Appium Standard Output ==="
+          if (Test-Path "$env:TEMP\appium.log") {
+            Get-Content "$env:TEMP\appium.log" -Tail 50
+          } else {
+            Write-Host "No appium.log found"
+          }
+
+          Write-Host "`n=== Appium Error Output ==="
+          if (Test-Path "$env:TEMP\appium-error.log") {
+            Get-Content "$env:TEMP\appium-error.log" -Tail 50
+          } else {
+            Write-Host "No appium-error.log found"
+          }
+
+          Write-Host "`n=== Checking if Appium is still running ==="
+          $appiumProcess = Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*appium*" }
+          if ($appiumProcess) {
+            Write-Host "Appium process is running (PID: $($appiumProcess.Id))"
+          } else {
+            Write-Host "WARNING: Appium process is NOT running!"
+          }
+
+      - name: Run Android tests
+        run: |
+          New-Item -ItemType Directory -Force -Path test-results | Out-Null
+
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $env:PYTHONIOENCODING = "utf-8"
+
+          $androidSdkPaths = @(
+            "$env:LOCALAPPDATA\Android\Sdk",
+            "$env:USERPROFILE\AppData\Local\Android\Sdk",
+            "C:\Android\Sdk"
+          )
+
+          foreach ($path in $androidSdkPaths) {
+            if (Test-Path $path) {
+              $env:ANDROID_HOME = $path
+              $env:ANDROID_SDK_ROOT = $path
+              break
+            }
+          }
+
+          $DEVICES = if ("${{ github.event.inputs.devices }}") { "${{ github.event.inputs.devices }}" } else { "fold6" }
+          $APP_ENV = if ("${{ github.event.inputs.app_env }}") { "${{ github.event.inputs.app_env }}" } else { "staging" }
+          $FILTER = "${{ github.event.inputs.test_filter }}"
+
+          Write-Host "Running tests: DEVICES=$DEVICES, ENV=$APP_ENV"
+
+          $PYTEST_ARGS = @("tests/android/", "--env=$APP_ENV", "--devices=$DEVICES", "--json-report", "--json-report-file=test-results/android-results.json", "-v", "-s")
+
+          if ($FILTER) {
+            $PYTEST_ARGS += "-k", $FILTER
+          }
+
+          & python -m pytest @PYTEST_ARGS
+          $testExitCode = $LASTEXITCODE
+
+          if ($testExitCode -ne 0) {
+            Write-Host "Tests completed with errors (exit code: $testExitCode)"
+          } else {
+            Write-Host "Tests completed successfully"
+          }
+
+      - name: Sync results to Zephyr
+        if: always()
+        env:
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+        run: |
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $env:PYTHONIOENCODING = "utf-8"
+
+          $CYCLE_ID = "${{ github.event.inputs.cycle_id }}"
+          $ENVIRONMENT = if ("${{ github.event.inputs.environment }}") { "${{ github.event.inputs.environment }}" } else { "Android-ZFold6" }
+
+          if (-not $CYCLE_ID) {
+            Write-Host "WARNING: Cycle ID not provided, skipping Zephyr sync"
+            exit 0
+          }
+
+          if (-not $env:ZEPHYR_API_TOKEN) {
+            Write-Host "WARNING: ZEPHYR_API_TOKEN not set, skipping Zephyr sync"
+            exit 0
+          }
+
+          Write-Host "Syncing results to Zephyr: Cycle=$CYCLE_ID, Environment=$ENVIRONMENT"
+          python scripts/zephyr_client.py --results test-results/android-results.json --project QA --cycle $CYCLE_ID --environment $ENVIRONMENT
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          $OutputEncoding = [System.Text.Encoding]::UTF8
+          [Console]::OutputEncoding = [System.Text.Encoding]::UTF8
+          $env:PYTHONIOENCODING = "utf-8"
+
+          if (-not $env:SLACK_WEBHOOK_URL) {
+            Write-Host "WARNING: SLACK_WEBHOOK_URL not set, skipping Slack notification"
+            exit 0
+          }
+
+          $ENVIRONMENT = if ("${{ github.event.inputs.environment }}") { "${{ github.event.inputs.environment }}" } else { "Android-ZFold6" }
+          $CYCLE_ID = "${{ github.event.inputs.cycle_id }}"
+          $DEVICES = if ("${{ github.event.inputs.devices }}") { "${{ github.event.inputs.devices }}" } else { "fold6" }
+          $WORKFLOW_URL = "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          Write-Host "Sending Slack notification..."
+          python scripts/slack_notifier.py --results test-results/android-results.json --environment $ENVIRONMENT --cycle $CYCLE_ID --devices $DEVICES --workflow-url $WORKFLOW_URL
+          if ($LASTEXITCODE -ne 0) { Write-Host "Slack notification failed" }
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: android-test-results-${{ github.run_number }}
+          path: |
+            test-results/*.json
+            test-results/screenshots/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          Get-Process -Name "node" -ErrorAction SilentlyContinue | Where-Object { $_.CommandLine -like "*appium*" } | Stop-Process -Force -ErrorAction SilentlyContinue
+          Write-Host "Cleanup completed"

@@ -1,0 +1,30 @@
+# Qwen2.5-Coder-7B LoRA 학습 설정
+# 코드 생성 전용 — TC JSON → Python Appium 테스트 코드
+
+model: "mlx-community/Qwen2.5-Coder-7B-Instruct-4bit"
+
+# 학습 데이터 (prepare_data.py 출력). 상대경로=이식성(머신무관) — code_gen 디렉터리에서 실행.
+data: "data"
+
+# ─── LoRA ───────────────────────────────────────────────
+lora_layers: 8
+lora_rank: 8
+lora_scale: 16.0
+lora_dropout: 0.05
+
+# ─── 학습 하이퍼파라미터 ────────────────────────────────
+batch_size: 1
+iters: 300
+learning_rate: 1.0e-5
+steps_per_eval: 25
+val_batches: 5
+save_every: 25
+grad_checkpoint: true
+
+# ─── 출력 경로 (상대=머신무관, code_gen 디렉터리에서 실행) ──
+adapter_path: "adapters"
+
+# ─── 시퀀스 길이 ────────────────────────────────────────
+# 실측(Qwen 토크나이저): train 중앙 2903·최대 5987 토큰. 6144면 전부 수용(초과 0).
+# 32GB 기준. 16GB면 OOM 위험하니 5120(1개 잘림)이나 4096(9개 잘림)으로 낮추기.
+max_seq_length: 6144

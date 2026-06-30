@@ -1,0 +1,48 @@
+# MLX-LM LoRA 파인튜닝 설정 (Apple Silicon 로컬, 램 32GB 가정)
+
+# ─── 모델 ───────────────────────────────────────────────
+# 옵션 A: EXAONE 3.5 7.8B (현재 선택 - 한국어 특화, 다운로드됨)
+model: "mlx-community/EXAONE-3.5-7.8B-Instruct-4bit"
+
+# 옵션 B: Qwen2.5-7B (한국어 성능 우수)
+# model: "mlx-community/Qwen2.5-7B-Instruct-4bit"
+
+# 옵션 C: Gemma4 E4B (VLM - seq_len 512 제한으로 학습 품질 낮음)
+# model: "mlx-community/gemma-4-e4b-it-4bit"
+
+# 옵션 D: Qwen3.5 9B (9B라 메모리 더 필요)
+# model: "mlx-community/Qwen3.5-9B-MLX-4bit"
+
+# ─── 데이터 ─────────────────────────────────────────────
+# prepare_data.py 가 생성한 JSONL 경로 (디렉토리 지정 시 train.jsonl/valid.jsonl 자동 탐색)
+data: "data_simple"
+
+# ─── LoRA 설정 (mlx_lm 0.31.3 형식) ─────────────────────
+# 주의: 구버전 키(lora_layers/lora_rank/lora_scale)는 무시됨 → num_layers + lora_parameters 사용
+num_layers: 16          # multi-req 구조 학습 위해 표현력 강화 (기본 16)
+lora_parameters:
+  rank: 16              # 8 → 16 (어댑터 용량 증가)
+  scale: 32.0          # rank×2 유지
+  dropout: 0.1         # regularization
+
+# ─── 학습 하이퍼파라미터 ────────────────────────────────
+batch_size: 2           # 32GB면 2, 16GB면 1
+iters: 300              # batch2 + early-stop
+learning_rate: 6.0e-6   # 1e-5는 iter175 즈음 발산해서 6e-6로 내림
+
+# 검증 주기
+steps_per_eval: 25
+val_batches: 5          # 3 → 5 (검증 노이즈 감소)
+
+# 저장 주기
+save_every: 25
+
+# ─── 출력 경로 ──────────────────────────────────────────
+# 상대경로 (finetune 디렉토리에서 실행 — 다른 머신에서도 동작)
+adapter_path: "adapters_v21b2"
+
+# ─── 시퀀스 길이 ────────────────────────────────────────
+max_seq_length: 3072    # 실데이터 최대 3020토큰 → 3072면 0% 잘림 (4096은 과함)
+
+# ─── 메모리 절약 ────────────────────────────────────────
+grad_checkpoint: true   # 16GB면 필수(끄면 OOM), 램 넉넉하면 false가 더 빠름

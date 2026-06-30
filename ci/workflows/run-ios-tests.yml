@@ -1,0 +1,187 @@
+name: Run iOS Tests
+
+on:
+  workflow_dispatch:
+    inputs:
+      devices:
+        description: 'Devices to test (se3, 12mini, 16e, all, or comma-separated)'
+        required: false
+        default: 'se3'
+        type: string
+      app_env:
+        description: 'App environment (staging or production)'
+        required: false
+        default: 'staging'
+        type: choice
+        options:
+          - staging
+          - production
+      test_filter:
+        description: 'pytest filter (e.g., test_qa_35554)'
+        required: false
+        type: string
+      cycle_id:
+        description: 'Zephyr Test Cycle ID'
+        required: true
+        type: string
+      environment:
+        description: 'Test environment name'
+        required: false
+        default: 'iOS-SE3'
+        type: string
+
+env:
+  APPIUM_PORT: '4723'
+
+jobs:
+  ios-test:
+    name: iOS Device Test
+    runs-on: [self-hosted, macOS]
+    timeout-minutes: 480
+    defaults:
+      run:
+        shell: bash
+
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Setup Python
+        run: |
+          python3 -m venv venv
+          source venv/bin/activate
+          PIP_USER=false pip install -r requirements.txt
+
+      - name: Check device connection
+        run: |
+          echo "🔍 연결된 iOS 디바이스 확인..."
+          ~/bin/ios list || echo "No devices found"
+
+      - name: Start WDA for devices
+        run: |
+          echo "🔌 WDA 시작..."
+          DEVICES="${{ github.event.inputs.devices || 'se3' }}"
+
+          cd tests/ios
+
+          chmod +x start_wda.sh
+
+          if [[ "$DEVICES" == "all" ]]; then
+            ./start_wda.sh all
+          elif [[ "$DEVICES" == "se3" ]]; then
+            ./start_wda.sh se3
+          elif [[ "$DEVICES" == "12mini" ]]; then
+            ./start_wda.sh 12mini
+          elif [[ "$DEVICES" == "16e" ]]; then
+            ./start_wda.sh 16e
+          else
+            ./start_wda.sh all
+          fi
+
+          sleep 5
+          echo ""
+          echo "📊 최종 WDA 상태:"
+          for port in 8100 8101 8102; do
+            if curl -s "http://127.0.0.1:$port/status" > /dev/null 2>&1; then
+              echo "✅ Port $port: 연결됨"
+            fi
+          done
+
+      - name: Start Appium server
+        run: |
+          echo "🚀 Appium 서버 시작..."
+          pkill -f "appium" || true
+          nohup appium --port ${{ env.APPIUM_PORT }} > /tmp/appium.log 2>&1 &
+          sleep 5
+          curl -s http://127.0.0.1:${{ env.APPIUM_PORT }}/status || echo "Appium not ready"
+
+      - name: Run iOS tests
+        run: |
+          source venv/bin/activate
+          mkdir -p test-results
+
+          DEVICES="${{ github.event.inputs.devices || 'se3' }}"
+          APP_ENV="${{ github.event.inputs.app_env || 'staging' }}"
+          FILTER="${{ github.event.inputs.test_filter }}"
+
+          echo "📱 테스트 실행: DEVICES=$DEVICES, ENV=$APP_ENV"
+
+          PYTEST_ARGS="tests/ios/ --env=$APP_ENV --devices=$DEVICES --json-report --json-report-file=test-results/ios-results.json -v -s"
+
+          if [ -n "$FILTER" ]; then
+            pytest $PYTEST_ARGS -k "$FILTER" || true
+          else
+            pytest $PYTEST_ARGS || true
+          fi
+
+      - name: Sync results to Zephyr
+        if: always()
+        env:
+          ZEPHYR_API_TOKEN: ${{ secrets.ZEPHYR_API_TOKEN }}
+        run: |
+          source venv/bin/activate
+
+          CYCLE_ID="${{ github.event.inputs.cycle_id }}"
+          ENVIRONMENT="${{ github.event.inputs.environment || 'iOS-SE3' }}"
+
+          if [ -z "$CYCLE_ID" ]; then
+            echo "⚠️ Cycle ID not provided, skipping Zephyr sync"
+            exit 0
+          fi
+
+          if [ -z "$ZEPHYR_API_TOKEN" ]; then
+            echo "⚠️ ZEPHYR_API_TOKEN not set, skipping Zephyr sync"
+            exit 0
+          fi
+
+          echo "📊 Zephyr 결과 동기화: Cycle=$CYCLE_ID, Environment=$ENVIRONMENT"
+          python scripts/zephyr_client.py \
+            --results test-results/ios-results.json \
+            --project QA \
+            --cycle "$CYCLE_ID" \
+            --environment "$ENVIRONMENT"
+
+      - name: Send Slack notification
+        if: always()
+        env:
+          SLACK_WEBHOOK_URL: ${{ secrets.SLACK_WEBHOOK_URL }}
+        run: |
+          source venv/bin/activate
+
+          if [ -z "$SLACK_WEBHOOK_URL" ]; then
+            echo "⚠️ SLACK_WEBHOOK_URL not set, skipping Slack notification"
+            exit 0
+          fi
+
+          ENVIRONMENT="${{ github.event.inputs.environment || 'iOS-SE3' }}"
+          CYCLE_ID="${{ github.event.inputs.cycle_id }}"
+          DEVICES="${{ github.event.inputs.devices || 'se3' }}"
+          WORKFLOW_URL="${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+
+          echo "📢 Slack 알림 전송..."
+          python scripts/slack_notifier.py \
+            --results test-results/ios-results.json \
+            --environment "$ENVIRONMENT" \
+            --cycle "$CYCLE_ID" \
+            --devices "$DEVICES" \
+            --workflow-url "$WORKFLOW_URL" || echo "Slack notification failed"
+
+      - name: Upload test results
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: ios-test-results-${{ github.run_number }}
+          path: |
+            test-results/*.json
+            test-results/screenshots/
+          retention-days: 30
+
+      - name: Cleanup
+        if: always()
+        run: |
+          echo "🧹 정리 작업..."
+          pkill -f "appium" || true
+          pkill -f "iproxy" || true
+          pkill -f "ios forward" || true
+          pkill -f "ios runwda" || true
+          echo "정리 완료"
